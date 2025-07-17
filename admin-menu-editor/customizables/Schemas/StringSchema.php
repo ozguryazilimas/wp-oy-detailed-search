@@ -38,6 +38,10 @@ class StringSchema extends CheckableSchema {
 		return $this->addCheck('trim');
 	}
 
+	public function stripTags() {
+		return $this->addCheck('stripTags');
+	}
+
 	/**
 	 * Make the schema strict, meaning that the value must be a string.
 	 *
@@ -59,6 +63,10 @@ class StringSchema extends CheckableSchema {
 
 		if ( $this->_strict && !is_string($value) ) {
 			return self::addError($errors, 'not_string', 'Value must be a string');
+		}
+
+		if ( is_array($value) ) {
+			return self::addError($errors, 'not_string', 'Value must be a string, not an array');
 		}
 
 		$convertedValue = strval($value);
@@ -103,6 +111,9 @@ class StringSchema extends CheckableSchema {
 					break;
 				case 'trim':
 					$convertedValue = trim($convertedValue);
+					break;
+				case 'stripTags':
+					$convertedValue = wp_strip_all_tags($convertedValue);
 					break;
 			}
 

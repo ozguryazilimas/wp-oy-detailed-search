@@ -250,6 +250,35 @@ class ameUtils {
 	}
 
 	/**
+	 * Get specific keys from each item of a collection.
+	 *
+	 * Notes:
+	 * - Collection indexes are preserved.
+	 * - Items that don't have any of the specified keys are ignored.
+	 *
+	 * @param iterable $collection An iterable collection of arrays or objects.
+	 * @param array $keys
+	 * @return array[] Array of arrays.
+	 */
+	public static function collectionPick($collection, array $keys) {
+		$result = array();
+		foreach ($collection as $index => $item) {
+			$values = array();
+			foreach ($keys as $key) {
+				if ( is_array($item) && array_key_exists($key, $item) ) {
+					$values[$key] = $item[$key];
+				} else if ( is_object($item) && property_exists($item, $key) ) {
+					$values[$key] = $item->$key;
+				}
+			}
+			if ( !empty($values) ) {
+				$result[$index] = $values;
+			}
+		}
+		return $result;
+	}
+
+	/**
 	 * Send HTTP caching headers.
 	 *
 	 * @param int|null $lastModified Unix timestamp for the last modification time.
@@ -439,7 +468,7 @@ class ameFileLock {
 	}
 
 	//fopen() and flock() should be fine here because we only need read permissions.
-	//phpcs:disable WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock,WordPress.WP.AlternativeFunctions.file_system_read_fopen
+	//phpcs:disable WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock,WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 	public function acquire($timeout = null) {
 		if ( $this->handle !== null ) {
 			throw new RuntimeException('Cannot acquire a lock that is already held.');
@@ -1073,5 +1102,52 @@ class ameParsedKnockoutFormSubmission {
 			$this->fields,
 			self::SELECTED_ACTOR_FIELD
 		);
+	}
+}
+
+class ameLockedGlobalOption {
+	private $optionName;
+	private $lockFileName;
+	private $autoload;
+	/**
+	 * @var float|null
+	 */
+	private $lockTimeout;
+
+	/**
+	 * @param string $optionName
+	 * @param string $lockFileName
+	 * @param float|null $lockTimeout
+	 * @param bool|null $autoload
+	 */
+	public function __construct($optionName, $lockFileName, $lockTimeout = null, $autoload = null) {
+		$this->optionName = $optionName;
+		$this->lockFileName = $lockFileName;
+		$this->autoload = $autoload;
+		$this->lockTimeout = $lockTimeout;
+	}
+
+	public function get($defaultValue = null) {
+		if ( is_multisite() ) {
+			return get_site_option($this->optionName, $defaultValue);
+		} else {
+			return get_option($this->optionName, $defaultValue);
+		}
+	}
+
+	public function set($value) {
+		$lock = ameFileLock::create($this->lockFileName);
+
+		if ( $lock->acquire($this->lockTimeout) ) {
+			if ( is_multisite() ) {
+				update_site_option($this->optionName, $value);
+			} else {
+				update_option($this->optionName, $value, $this->autoload);
+			}
+			$lock->release();
+			return true;
+		}
+
+		return false;
 	}
 }

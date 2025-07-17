@@ -88,7 +88,7 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 	private $virtual_caps_for_this_call = array();
 
 	public $disable_virtual_caps = false;
-	public $virtual_cap_mode = 3; //self::ALL_VIRTUAL_CAPS
+	public $virtual_cap_mode = self::ALL_VIRTUAL_CAPS;
 
 	/**
 	 * @var array<string,true|string> An index of URLs relative to /wp-admin/. Any menus that match the index will be ignored.
@@ -440,6 +440,7 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 		//Grant virtual capabilities like "super_user" to users.
 		add_filter('user_has_cap', array($this, 'grant_virtual_caps_to_user'), 9, 3);
 		add_filter('user_has_cap', array($this, 'regrant_virtual_caps_to_user'), 200, 1);
+		add_filter('map_meta_cap', array($this, 'identity_map_meta_cap_for_user'), 200, 3);
 
 		//Update caches when the current user changes.
 		add_action('set_current_user', array($this, 'update_current_user_cache'), 2, 0); //Run before most plugins.
@@ -1213,7 +1214,7 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 	 *
 	 * @param array $roles
 	 * @param array $users
-	 * @return array [capability => true]
+	 * @return array [capability => string[]]
 	 */
 	private function detect_meta_caps($roles, $users) {
 		if ( !$this->current_user_can_edit_menu() || !is_super_admin() ) {
@@ -1243,7 +1244,29 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 		//that's probably a non-meta cap that isn't enabled for *anyone*.
 		$suspectedMetaCaps = array_filter(array_keys($suspectedMetaCaps), 'current_user_can');
 
-		return array_fill_keys($suspectedMetaCaps, true);
+		//Attempt to map meta caps to real capabilities.
+		$result = [];
+		$currentUserId = get_current_user_id();
+		foreach ($suspectedMetaCaps as $metaCap) {
+			$caps = map_meta_cap($metaCap, $currentUserId);
+			if ( is_array($caps) ) {
+				//Discard the "do_not_allow" cap and the meta cap itself (the latter matters
+				//for "view_site_health_checks" which is granted via a different filter).
+				$caps = array_filter($caps, function ($cap) use ($metaCap) {
+					return ($cap !== 'do_not_allow') && ($cap !== $metaCap);
+				});
+
+				//"view_site_health_checks" is essentially a meta cap, but it's granted via
+				//the "user_has_cap" filter, so it doesn't show up in the "map_meta_cap()" results.
+				/** @see wp_maybe_grant_site_health_caps() */
+				if ( empty($caps) && ($metaCap === 'view_site_health_checks') && !is_multisite() ) {
+					$caps = ['install_plugins'];
+				}
+				$result[$metaCap] = $caps;
+			}
+		}
+
+		return $result;
 	}
 
 	/**
@@ -1991,7 +2014,7 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 		$tree = ameMenu::remove_missing_items($tree);
 		//TODO: What would happen if we kept missing items?
 
-		//Lets merge in the unused items.
+		//Let's merge in the unused items.
 		$max_menu_position = !empty($positions_by_template) ? max($positions_by_template) : 100;
 		$new_grant_access = $this->get_new_menu_grant_access();
 		foreach ($this->item_templates as $template_id => $template){
@@ -2006,7 +2029,13 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 			$entry['defaults'] = $template['defaults'];
 			$entry['unused'] = true; //Note that this item is unused
 
-			$entry['grant_access'] = $new_grant_access;
+			//Set new item permissions.
+			//Exception: The top-level "Profile" menu that only exists for non-admin users shouldn't be
+			//hidden. It gets flagged as new/unused because it doesn't exist for admin users (they have
+			//"Users -> Profile" instead).
+			if ( $template_id !== '>profile.php' ) {
+				$entry['grant_access'] = $new_grant_access;
+			}
 
 			if ($this->options['unused_item_position'] === 'relative') {
 
@@ -4866,15 +4895,12 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 		}
 		$user_id = intval($args[1]);
 
-		if ( !isset($this->cached_virtual_user_caps[$user_id]) ) {
-			$this->update_virtual_cap_cache($this->get_user_by_id($user_id));
-		}
-
-		if ( empty($this->cached_virtual_user_caps[$user_id][$this->virtual_cap_mode]) ) {
+		$caps_for_user = $this->get_virtual_caps_for_user($user_id);
+		if ( empty($caps_for_user) ) {
 			return $capabilities;
 		}
 
-		$this->virtual_caps_for_this_call = $this->cached_virtual_user_caps[$user_id][$this->virtual_cap_mode];
+		$this->virtual_caps_for_this_call = $caps_for_user;
 
 		$capabilities = array_merge($capabilities, $this->virtual_caps_for_this_call);
 		return $capabilities;
@@ -4896,6 +4922,100 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 			$this->virtual_caps_for_this_call = array();
 		}
 		return $capabilities;
+	}
+
+	private function get_virtual_caps_for_user($userId) {
+		if ( !isset($this->cached_virtual_user_caps[$userId]) ) {
+			$this->update_virtual_cap_cache($this->get_user_by_id($userId));
+		}
+
+		if ( empty($this->cached_virtual_user_caps[$userId][$this->virtual_cap_mode]) ) {
+			return [];
+		}
+
+		return $this->cached_virtual_user_caps[$userId][$this->virtual_cap_mode];
+	}
+
+	private $cached_identity_mapped_caps = null;
+
+	/**
+	 * Map selected meta caps to themselves so that they can be enabled by our "user_has_cap" filter.
+	 *
+	 * The "virtual capabilities" mechanism enables/disables certain capabilities for a user. That
+	 * doesn't work for meta capabilities because they're mapped to other, primitive capabilities
+	 * before they're checked. We can't reliably predict which primitive capabilities will be used,
+	 * especially for other plugins, so enabling the primitive caps is not always an option.
+	 *
+	 * Instead, we use the "map_meta_cap" filter to map only the relevant meta capabilities back to
+	 * themselves. This way, setting a meta cap in the "user_has_cap" filter will work as expected.
+	 *
+	 * @param string[]|mixed $primitiveCaps
+	 * @param string|mixed $requiredCap
+	 * @param int|mixed $userId
+	 * @return string[]
+	 */
+	public function identity_map_meta_cap_for_user($primitiveCaps, $requiredCap = '', $userId = 0) {
+		if ( $this->disable_virtual_caps ) {
+			return $primitiveCaps;
+		}
+
+		//Sanity checks.
+		$userId = intval($userId);
+		if ( ($userId <= 0) || !is_string($requiredCap) || !is_array($primitiveCaps) ) {
+			return $primitiveCaps;
+		}
+
+		//Is the cap set for the user?
+		$virtualCapsForUser = $this->get_virtual_caps_for_user($userId);
+		if ( empty($virtualCapsForUser) || !isset($virtualCapsForUser[$requiredCap]) ) {
+			return $primitiveCaps;
+		}
+
+		//map_meta_cap() is called a lot, so let's cache the capability list.
+		if ( $this->cached_identity_mapped_caps === null ) {
+			$custom_menu = $this->load_custom_menu();
+			if (
+				!empty($custom_menu)
+				&& !empty($custom_menu['suspected_meta_caps'])
+				&& !$this->menu_structure_feature->isCustomizationDisabled()
+			) {
+				$this->cached_identity_mapped_caps = array_fill_keys($custom_menu['suspected_meta_caps'], true);
+			} else {
+				$this->cached_identity_mapped_caps = [];
+			}
+
+			//Exclude dangerous Super User capabilities; don't remap them.
+			$dangerousSuperAdminCaps = [
+				'create_sites'           => true,
+				'delete_sites'           => true,
+				'manage_network'         => true,
+				'manage_sites'           => true,
+				'manage_network_users'   => true,
+				'manage_network_plugins' => true,
+				'manage_network_themes'  => true,
+				'manage_network_options' => true,
+				'upgrade_network'        => true,
+				'setup_network'          => true,
+				'update_php'             => true,
+				'update_https'           => true,
+			];
+			$this->cached_identity_mapped_caps = array_diff_key(
+				$this->cached_identity_mapped_caps,
+				$dangerousSuperAdminCaps
+			);
+		}
+
+		if ( !empty($this->cached_identity_mapped_caps[$requiredCap]) ) {
+			//Just to be safe, let's not override "do_not_allow" results.
+			if ( ($requiredCap === 'do_not_allow') || in_array('do_not_allow', $primitiveCaps) ) {
+				return $primitiveCaps;
+			}
+
+			//Map the meta cap to itself.
+			return [$requiredCap];
+		}
+
+		return $primitiveCaps;
 	}
 
 	/**
@@ -5111,12 +5231,12 @@ class WPMenuEditor extends MenuEd_ShadowPluginFramework {
 
 		$power_filename = AME_ROOT_DIR . '/includes/capabilities/cap-power.csv';
 		if ( is_file($power_filename) && is_readable($power_filename) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_fopen -- Should be fine, we only need read permissions.
+			//phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Should be fine, we only need read permissions.
 			$csv = fopen($power_filename, 'r');
 			$firstLineSkipped = false;
 
 			while ($csv && !feof($csv)) {
-				$line = fgetcsv($csv, 1000, ';');
+				$line = fgetcsv($csv, 1000, ';', '"', '');
 				if ( !$firstLineSkipped ) {
 					$firstLineSkipped = true;
 					continue;

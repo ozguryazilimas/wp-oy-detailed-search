@@ -320,8 +320,20 @@ class ContentPermissionsEnforcer {
 
 		//Collect the post type capabilities that map to core meta capabilities like "edit_post".
 		add_action('registered_post_type', function ($postTypeName, $postType = null) {
+			//Sanity check: $postType->cap should be an object.
+			//Multiple users reported an "illegal offset" error with the "Bricks" theme/site builder,
+			//which I can't reproduce since I don't have that theme. This check and the additional
+			//isset()/is_string() checks later are intended to prevent that error.
+			if ( !isset($postType->cap) || !is_object($postType->cap) ) {
+				return;
+			}
+
 			foreach (self::RELEVANT_POST_META_CAPS as $cap) {
-				if ( isset($postType->cap->$cap) && !isset($this->supportedPostCapsToMetaCaps[$postType->cap->$cap]) ) {
+				if (
+					isset($postType->cap->$cap)
+					&& is_string($postType->cap->$cap)
+					&& !isset($this->supportedPostCapsToMetaCaps[$postType->cap->$cap])
+				) {
 					$this->supportedPostCapsToMetaCaps[$postType->cap->$cap] = $cap;
 				}
 			}
@@ -556,7 +568,7 @@ class ContentPermissionsEnforcer {
 	 * @param int|null $userId
 	 * @return EvaluationResult|null
 	 */
-	protected function evaluatePostPolicy($post, Action $action = null, $userId = null) {
+	protected function evaluatePostPolicy($post, ?Action $action = null, $userId = null) {
 		//The action can be NULL for convenience, so that calling code doesn't have to check
 		//if the action registry returned NULL.
 		if ( $action === null ) {
