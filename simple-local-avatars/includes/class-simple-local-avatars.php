@@ -308,7 +308,6 @@ class Simple_Local_Avatars {
 	 * @return int|false
 	 */
 	public function get_user_id( $id_or_email ) {
-		global $wpdb;
 		$user_id = false;
 
 		if ( is_numeric( $id_or_email ) ) {
@@ -322,8 +321,6 @@ class Simple_Local_Avatars {
 		} elseif ( is_string( $id_or_email ) ) {
 			$user    = get_user_by( 'email', $id_or_email );
 			$user_id = $user ? $user->ID : '';
-		} else {
-			$user_id = $wpdb->get_var("SELECT user_id FROM wp_comments WHERE comment_author_email = '" . $id_or_email . "' LIMIT 1");
 		}
 
 		return $user_id;
@@ -1664,6 +1661,11 @@ class Simple_Local_Avatars {
 	 * @return void
 	 */
 	public function ajax_migrate_from_wp_user_avatar() {
+		// Check if user has the required capability.
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have sufficient permissions to access this page.', 'simple-local-avatars' ) );
+		}
+
 		// Bail early if nonce is not available.
 		if ( empty( sanitize_text_field( $_POST['migrateFromWpUserAvatarNonce'] ) ) ) {
 			die;
