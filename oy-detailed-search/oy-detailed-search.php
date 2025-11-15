@@ -285,7 +285,7 @@ function oy_generate_post_query($author_id, $date_begin, $date_end, $words_inclu
       $key_raw = html_entity_decode($key);
       $key_escaped = htmlentities($key_raw, ENT_QUOTES, 'UTF-8');
 
-      $query->extend_query("AND (post_title LIKE '%s' post_title LIKE '%s' OR post_content REGEXP %s OR post_content REGEXP %s)",
+      $query->extend_query("AND (post_title LIKE '%s' OR post_title LIKE '%s' OR post_content REGEXP %s OR post_content REGEXP %s)",
                            $key . ' ',
                            array(
                              '%' . $key_raw . '%',
